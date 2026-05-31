@@ -3,6 +3,10 @@
 import argparse
 import asyncio
 import sys
+from pathlib import Path
+
+# Ensure ITSM-UseCase/ is on sys.path so pipeline, hitl, and config resolve.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from aieng.agent_evals.logging_config import setup_logging
 from pipeline.orchestrator import run_pipeline

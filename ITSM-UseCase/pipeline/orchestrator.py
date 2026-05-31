@@ -1,5 +1,14 @@
 """End-to-end complaint triage pipeline orchestrator."""
 
+import sys
+from pathlib import Path
+
+# Ensure ITSM-UseCase/ is on sys.path so hitl, config, and pipeline
+# resolve correctly whether this file is run as a script or imported as a module.
+_itsm_root = Path(__file__).resolve().parent.parent
+if str(_itsm_root) not in sys.path:
+    sys.path.insert(0, str(_itsm_root))
+
 import argparse
 import asyncio
 import logging
