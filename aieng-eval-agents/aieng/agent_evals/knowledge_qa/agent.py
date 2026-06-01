@@ -1,4 +1,4 @@
-"""Knowledge-grounded QA agent using Google ADK with Google Search.
+ """Knowledge-grounded QA agent using Google ADK with Google Search.
 
 This module provides a ReAct agent with built-in planning via Gemini's thinking
 mode that explicitly calls tools and shows the reasoning process through observable

@@ -14,8 +14,9 @@ wheels/
 .pytest_cache/
 .ruff_cache/
 
-# Vscode
+# IDEs
 .vscode
+.vs/
 
 # macos
 *.DS_Store
