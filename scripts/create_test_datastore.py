@@ -1,18 +1,33 @@
 #!/usr/bin/env python3
-r"""Create a Vertex AI Search test data store for integration testing.
+r"""Provision a Vertex AI Search data store from a local JSONL file.
 
-Provisions the GCS bucket, uploads the fixture JSONL, creates a NO_CONTENT
+Provisions the GCS bucket, uploads the JSONL, creates a CONTENT_REQUIRED
 structured data store, imports the documents, and waits for indexing.
+
+Supports two JSONL formats:
+
+  Fixture format (integration tests):
+      {"id": "x", "text": "...", "title": "...", "category": "..."}
+
+  T&C ingest format (from knowledge_base/ingest.py):
+      {"clause_text": "...", "section": "...", "page_number": 1, "source": "..."}
 
 Usage
 -----
     # Authenticate first (or rely on the GCE service account in CI)
     gcloud auth application-default login
 
-    # Run from the repo root
-    uv run python -m scripts.create_test_datastore \\
-        --bucket <globally-unique-bucket-name> \\
-        [--project agentic-ai-evaluation-bootcamp] \\
+    # T&C datastore (run from the repo root)
+    python -m scripts.create_test_datastore \
+        --bucket <globally-unique-bucket-name> \
+        --jsonl ITSM-UseCase/data/processed/tnc_chunks.jsonl \
+        [--project agentic-ai-evaluation-bootcamp] \
+        [--datastore-id itsm-tnc-datastore]
+
+    # Integration test datastore (original behaviour)
+    python -m scripts.create_test_datastore \
+        --bucket <globally-unique-bucket-name> \
+        [--project agentic-ai-evaluation-bootcamp] \
         [--datastore-id vertex-search-integration-test]
 
 After the script finishes it prints the VERTEX_AI_DATASTORE_ID value
@@ -34,8 +49,9 @@ DISCOVERY_ENGINE_BASE = "https://discoveryengine.googleapis.com/v1"
 STORAGE_BASE = "https://storage.googleapis.com/storage/v1"
 STORAGE_UPLOAD_BASE = "https://storage.googleapis.com/upload/storage/v1"
 
-# Fixture file relative to the repo root
-FIXTURE_PATH = Path(__file__).parent.parent / "aieng-eval-agents" / "tests" / "fixtures" / "vertex_test_data.jsonl"
+# Default JSONL paths
+_DEFAULT_FIXTURE = Path(__file__).parent.parent / "aieng-eval-agents" / "tests" / "fixtures" / "vertex_test_data.jsonl"
+_DEFAULT_TNC = Path(__file__).parent.parent / "ITSM-UseCase" / "data" / "processed" / "tnc_chunks.jsonl"
 
 
 def get_session() -> google.auth.transport.requests.AuthorizedSession:
@@ -59,45 +75,55 @@ def create_bucket(session, project: str, bucket: str) -> None:
 
 
 def transform_to_content_required(source_path: Path) -> bytes:
-    """Transform participant-format JSONL to Discovery Engine CONTENT_REQUIRED format.
+    """Transform a JSONL file to Discovery Engine CONTENT_REQUIRED format.
 
-    Participant format (flat):
+    Handles two input formats automatically:
+
+    Fixture format:
         {"id": "x", "text": "...", "title": "...", "category": "..."}
 
-    Discovery Engine CONTENT_REQUIRED format:
+    T&C ingest format (from knowledge_base/ingest.py):
+        {"clause_text": "...", "section": "...", "page_number": 1, "source": "..."}
+
+    Output format:
         {
             "id": "x",
             "content": {"mimeType": "text/plain", "rawBytes": "<base64>"},
             "structData": {...}
         }
-
-    The ``text`` field becomes the indexed document content (stored as base64 rawBytes).
-    All other fields (except ``id``) become metadata in ``structData``.
     """
     if not source_path.exists():
-        raise FileNotFoundError(f"Fixture file not found: {source_path}")
+        raise FileNotFoundError(f"JSONL file not found: {source_path}")
 
     output_lines = []
-    for raw_line in source_path.read_text(encoding="utf-8").strip().splitlines():
+    for i, raw_line in enumerate(source_path.read_text(encoding="utf-8").strip().splitlines()):
         row = json.loads(raw_line)
-        doc_id = row.pop("id")
-        text = row.pop("text", "")
+
+        if "clause_text" in row:
+            # T&C ingest format — generate a sequential id
+            doc_id = f"tnc-{i:04d}"
+            text = row.pop("clause_text")
+        else:
+            # Fixture format — id and text are explicit fields
+            doc_id = row.pop("id")
+            text = row.pop("text", "")
+
         doc = {
             "id": doc_id,
             "content": {
                 "mimeType": "text/plain",
                 "rawBytes": base64.b64encode(text.encode("utf-8")).decode("ascii"),
             },
-            "structData": row,  # title, category, and any other metadata fields
+            "structData": row,
         }
         output_lines.append(json.dumps(doc))
 
     return "\n".join(output_lines).encode("utf-8")
 
 
-def upload_fixture(session, bucket: str, object_name: str) -> None:
-    """Transform and upload the JSONL fixture to GCS in CONTENT_REQUIRED format."""
-    payload = transform_to_content_required(FIXTURE_PATH)
+def upload_fixture(session, bucket: str, object_name: str, jsonl_path: Path) -> None:
+    """Transform and upload a JSONL file to GCS in CONTENT_REQUIRED format."""
+    payload = transform_to_content_required(jsonl_path)
     url = f"{STORAGE_UPLOAD_BASE}/b/{bucket}/o?uploadType=media&name={object_name}"
     resp = session.post(
         url,
@@ -105,17 +131,17 @@ def upload_fixture(session, bucket: str, object_name: str) -> None:
         headers={"Content-Type": "application/json"},
     )
     resp.raise_for_status()
-    print(f"  Transformed and uploaded {FIXTURE_PATH.name} → gs://{bucket}/{object_name}")
+    print(f"  Transformed and uploaded {jsonl_path.name} → gs://{bucket}/{object_name}")
 
 
-def create_datastore(session, project: str, datastore_id: str) -> None:
-    """Create a NO_CONTENT structured search data store, skipping if it exists."""
+def create_datastore(session, project: str, datastore_id: str, display_name: str) -> None:
+    """Create a CONTENT_REQUIRED structured search data store, skipping if it exists."""
     url = (
         f"{DISCOVERY_ENGINE_BASE}/projects/{project}/locations/global"
         f"/collections/default_collection/dataStores?dataStoreId={datastore_id}"
     )
     body = {
-        "displayName": "Vertex Search Integration Test",
+        "displayName": display_name,
         "industryVertical": "GENERIC",
         "contentConfig": "CONTENT_REQUIRED",
         "solutionTypes": ["SOLUTION_TYPE_SEARCH"],
@@ -196,9 +222,9 @@ def wait_for_operation(
 
 
 def main() -> None:
-    """Parse CLI arguments and provision the Vertex AI Search test data store."""
+    """Parse CLI arguments and provision the Vertex AI Search data store."""
     parser = argparse.ArgumentParser(
-        description="Provision a Vertex AI Search test data store.",
+        description="Provision a Vertex AI Search data store from a local JSONL file.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     parser.add_argument(
@@ -213,22 +239,30 @@ def main() -> None:
     )
     parser.add_argument(
         "--datastore-id",
-        default="vertex-search-integration-test",
-        help="Vertex AI Search data store ID (default: vertex-search-integration-test)",
+        default="itsm-tnc-datastore",
+        help="Vertex AI Search data store ID (default: itsm-tnc-datastore)",
+    )
+    parser.add_argument(
+        "--jsonl",
+        default=str(_DEFAULT_TNC),
+        help="Path to the JSONL file to upload (default: ITSM-UseCase/data/processed/tnc_chunks.jsonl)",
     )
     args = parser.parse_args()
 
-    gcs_object = "vertex-search-test/vertex_test_data.jsonl"
+    jsonl_path = Path(args.jsonl)
+    gcs_object = f"itsm-tnc/{jsonl_path.name}"
     gcs_uri = f"gs://{args.bucket}/{gcs_object}"
     datastore_resource = (
         f"projects/{args.project}/locations/global/collections/default_collection/dataStores/{args.datastore_id}"
     )
+    display_name = f"ITSM T&C Datastore ({args.datastore_id})"
 
-    print("Vertex AI Search — test data store provisioning")
+    print("Vertex AI Search — data store provisioning")
     print("=" * 55)
     print(f"  Project:    {args.project}")
     print(f"  Bucket:     gs://{args.bucket}")
     print(f"  Data store: {datastore_resource}")
+    print(f"  JSONL:      {jsonl_path}")
     print()
 
     session = get_session()
@@ -236,11 +270,11 @@ def main() -> None:
     print("Step 1/5  Creating GCS bucket…")
     create_bucket(session, args.project, args.bucket)
 
-    print("Step 2/5  Uploading fixture data to GCS…")
-    upload_fixture(session, args.bucket, gcs_object)
+    print("Step 2/5  Uploading JSONL to GCS…")
+    upload_fixture(session, args.bucket, gcs_object, jsonl_path)
 
     print("Step 3/5  Creating Vertex AI Search data store…")
-    create_datastore(session, args.project, args.datastore_id)
+    create_datastore(session, args.project, args.datastore_id, display_name)
 
     print("Step 4/5  Importing documents…")
     operation_name = import_documents(session, args.project, args.datastore_id, gcs_uri)
