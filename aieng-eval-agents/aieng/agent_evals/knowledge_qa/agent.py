@@ -19,6 +19,7 @@ from aieng.agent_evals.tools import (
     create_google_search_tool,
     create_grep_file_tool,
     create_read_file_tool,
+    create_vertex_search_tool,
     create_web_fetch_tool,
 )
 from google.adk.agents import Agent
@@ -148,6 +149,9 @@ class AgentResponse(BaseModel):
     reasoning_chain: list[str] = Field(default_factory=list)
     tool_calls: list[dict[str, Any]] = Field(default_factory=list)
     total_duration_ms: int = 0
+    replan_count: int = 0
+    rate_limit_retries: int = 0
+    overflow_resets: int = 0
 
 
 class KnowledgeGroundedAgent:
@@ -224,6 +228,11 @@ class KnowledgeGroundedAgent:
         self._grep_file_tool = create_grep_file_tool()
         self._read_file_tool = create_read_file_tool()
 
+        # Optionally add vertex_search if a data store is configured
+        self._vertex_search_tool = None
+        if config.vertex_datastore_id:
+            self._vertex_search_tool = create_vertex_search_tool(config=config)
+
         # Create planner if enabled
         planner = None
         if enable_planning:
@@ -235,17 +244,21 @@ class KnowledgeGroundedAgent:
         if thinking_budget > 0 and self._supports_thinking(self.model):
             thinking_config = types.ThinkingConfig(thinking_budget=thinking_budget)
 
+        _tools = [
+            self._search_tool,
+            self._web_fetch_tool,
+            self._fetch_file_tool,
+            self._grep_file_tool,
+            self._read_file_tool,
+        ]
+        if self._vertex_search_tool:
+            _tools.append(self._vertex_search_tool)
+
         self._agent = Agent(
             name="knowledge_qa",
             model=self.model,
             instruction=build_system_instructions(),
-            tools=[
-                self._search_tool,
-                self._web_fetch_tool,
-                self._fetch_file_tool,
-                self._grep_file_tool,
-                self._read_file_tool,
-            ],
+            tools=_tools,
             planner=planner,
             generate_content_config=types.GenerateContentConfig(
                 temperature=self.temperature,
@@ -258,6 +271,11 @@ class KnowledgeGroundedAgent:
 
         # Token tracking for context usage display
         self._token_tracker = TokenTracker(model=self.model)
+
+        # Online evaluation counters — reset between questions via reset()
+        self._replan_count: int = 0
+        self._rate_limit_retries: int = 0
+        self._overflow_resets: int = 0
 
         # Session service for conversation history
         self._session_service = InMemorySessionService()
@@ -330,6 +348,9 @@ class KnowledgeGroundedAgent:
         self._session_service = InMemorySessionService()
         self._current_plan = None
         self._token_tracker = TokenTracker(model=self.model)
+        self._replan_count = 0
+        self._rate_limit_retries = 0
+        self._overflow_resets = 0
 
         # Recreate runner with fresh session service
         if self._app is not None:
@@ -437,6 +458,7 @@ class KnowledgeGroundedAgent:
 
         # Check for replanning first
         if REPLANNING_TAG in text:
+            self._replan_count += 1
             self._update_plan_from_text(text, question, is_replan=True)
         # Check for initial planning (only if plan is empty)
         elif PLANNING_TAG in text and len(self._current_plan.steps) == 0:
@@ -581,6 +603,13 @@ class KnowledgeGroundedAgent:
         error occurs, resets the session and retries once with fresh context.
         """
 
+        # Track rate-limit retries in a mutable cell for the closure
+        _retry_count: list[int] = [0]
+
+        def _count_and_log(retry_state: Any) -> None:
+            _retry_count[0] += 1
+            before_sleep_log(logger, logging.WARNING)(retry_state)
+
         # Create a retry-wrapped version of the inner method
         @retry(
             retry=retry_if_exception(is_retryable_api_error),
@@ -590,15 +619,18 @@ class KnowledgeGroundedAgent:
                 jitter=API_RETRY_JITTER,
             ),
             stop=stop_after_attempt(API_RETRY_MAX_ATTEMPTS),
-            before_sleep=before_sleep_log(logger, logging.WARNING),
+            before_sleep=_count_and_log,
             reraise=False,  # Don't reraise to avoid noisy stack traces
         )
         async def _run_with_retry() -> dict[str, Any]:
             return await self._run_agent_once_inner(question, adk_session_id)
 
         try:
-            return await _run_with_retry()
+            result = await _run_with_retry()
+            self._rate_limit_retries += _retry_count[0]
+            return result
         except RetryError as e:
+            self._rate_limit_retries += _retry_count[0]
             # Clean error message when retries are exhausted
             original_error = e.last_attempt.exception()
             logger.error(f"API retry failed after {API_RETRY_MAX_ATTEMPTS} attempts: {original_error}")
@@ -606,8 +638,10 @@ class KnowledgeGroundedAgent:
                 f"API request failed after {API_RETRY_MAX_ATTEMPTS} retry attempts. Last error: {original_error}"
             ) from original_error
         except ClientError as e:
+            self._rate_limit_retries += _retry_count[0]
             # Handle context overflow by resetting session
             if is_context_overflow_error(e):
+                self._overflow_resets += 1
                 logger.warning(f"Context overflow detected: {e}")
                 logger.warning("Resetting session and retrying with fresh context...")
 
@@ -724,6 +758,9 @@ class KnowledgeGroundedAgent:
             reasoning_chain=results.get("reasoning_chain", []),
             tool_calls=results.get("tool_calls", []),
             total_duration_ms=total_duration_ms,
+            replan_count=self._replan_count,
+            rate_limit_retries=self._rate_limit_retries,
+            overflow_resets=self._overflow_resets,
         )
 
     def answer(
