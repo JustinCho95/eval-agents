@@ -21,6 +21,8 @@ from aieng.agent_evals.knowledge_qa.deepsearchqa_grader import (
 )
 from langfuse.experiment import Evaluation, ExperimentResult
 
+from aieng.agent_evals.knowledge_qa.data.ground_truth import get_annotations
+
 from .graders.plan_quality import derive_plan_rubric
 from .graders.plan_quality import error_evaluations as plan_error_evals
 from .graders.plan_quality import evaluate_plan_quality
@@ -145,7 +147,15 @@ async def plan_quality_evaluator(
 
         answer_type = (metadata or {}).get("answer_type", "Set Answer")
         problem_category = (metadata or {}).get("category", "")
+        example_id = (metadata or {}).get("example_id")
+
+        # Start with auto-derived rubric, then overlay any per-question annotations
         plan_rubric = (metadata or {}).get("plan_rubric") or derive_plan_rubric(answer_type, problem_category)
+        if example_id is not None:
+            overrides = get_annotations().get_plan_rubric_overrides(int(example_id))
+            if overrides:
+                plan_rubric = {**plan_rubric, **overrides}
+                logger.debug("Applied plan rubric annotation for example_id=%s", example_id)
 
         return await evaluate_plan_quality(
             question=input,
@@ -172,7 +182,15 @@ async def tool_selection_evaluator(
         answer_text = output.get("text", "") if isinstance(output, dict) else str(output)
         problem_category = (metadata or {}).get("category", "")
         answer_type = (metadata or {}).get("answer_type", "Set Answer")
+        example_id = (metadata or {}).get("example_id")
+
+        # Start with auto-derived pattern, then overlay any per-question annotations
         tool_pattern = (metadata or {}).get("tool_pattern") or derive_tool_pattern(problem_category, answer_type)
+        if example_id is not None:
+            overrides = get_annotations().get_tool_pattern_overrides(int(example_id))
+            if overrides:
+                tool_pattern = {**tool_pattern, **overrides}
+                logger.debug("Applied tool pattern annotation for example_id=%s", example_id)
 
         return await evaluate_tool_selection(
             question=input,

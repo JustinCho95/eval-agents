@@ -1,0 +1,21 @@
+# Ground truth annotations for offline evaluation graders.
+#
+# Each line is a JSON object keyed by example_id (integer from DSQAExample.example_id).
+# Fields you can annotate:
+#
+#   plan_rubric.must_cover          — list of key concepts the plan must address
+#                                     (the only field that cannot be auto-derived)
+#   tool_pattern.reference_tool_call_count — expected number of tool calls from
+#                                     an expert run (overrides the category average)
+#
+# All other rubric fields (min_steps, max_steps, complexity, must_have_synthesis,
+# must_use, may_use, data_type) are auto-derived from answer_type and problem_category
+# and do not need to be listed here unless you want to override them.
+#
+# How to find example IDs:
+#   Run the helper cell in 06_offline_evaluation.ipynb (Section 0: Browse Questions)
+#   or run:  python data/langfuse_upload.py --samples 20 --category "Finance & Economics"
+#   then inspect the Langfuse dataset items for their example_id values.
+#
+# Format example (replace with real IDs from your dataset):
+# {"example_id": 1001, "plan_rubric": {"must_cover": ["concept A", "concept B"]}, "tool_pattern": {"reference_tool_call_count": 4}}

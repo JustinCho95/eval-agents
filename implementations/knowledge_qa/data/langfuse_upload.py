@@ -16,6 +16,7 @@ from pathlib import Path
 
 import click
 from aieng.agent_evals.knowledge_qa.data import DeepSearchQADataset
+from aieng.agent_evals.knowledge_qa.data.ground_truth import get_annotations
 from aieng.agent_evals.langfuse import upload_dataset_to_langfuse as upload_file_to_langfuse
 from dotenv import load_dotenv
 
@@ -82,15 +83,29 @@ async def upload_deepsearch_qa_to_langfuse(
         temp_path = Path(temp_file.name)
         logger.info(f"Writing {len(examples)} examples to temporary file...")
 
+        annotations = get_annotations()
+        if len(annotations):
+            logger.info("Merging ground truth annotations for %d annotated examples", len(annotations))
+
         for example in examples:
+            metadata: dict = {
+                "example_id": example.example_id,
+                "category": example.problem_category,
+                "answer_type": example.answer_type,
+            }
+
+            # Merge per-question ground truth annotations when available
+            plan_overrides = annotations.get_plan_rubric_overrides(example.example_id)
+            tool_overrides = annotations.get_tool_pattern_overrides(example.example_id)
+            if plan_overrides:
+                metadata["plan_rubric"] = plan_overrides
+            if tool_overrides:
+                metadata["tool_pattern"] = tool_overrides
+
             record = {
                 "input": example.problem,
                 "expected_output": example.answer,
-                "metadata": {
-                    "example_id": example.example_id,
-                    "category": example.problem_category,
-                    "answer_type": example.answer_type,
-                },
+                "metadata": metadata,
             }
             temp_file.write(json.dumps(record, ensure_ascii=False) + "\n")
 
