@@ -43,6 +43,12 @@ have the complete list should you fetch details for each member. Do not issue
 separate narrow searches for individual members before knowing what the full
 set contains.
 
+**For the same metric across multiple entities** (e.g., "GDP growth rates for all G7 countries", "inflation rates across OECD members"):
+Search for a consolidated multi-entity table first — IMF World Economic Outlook,
+World Bank Open Data, OECD.Stat, or Eurostat. One consolidated source is more
+consistent and requires far fewer tool calls than individual per-entity searches.
+Only fall back to per-entity searches if no consolidated source is available.
+
 ## Adapting Your Plan
 
 If your initial approach doesn't yield the needed information:
